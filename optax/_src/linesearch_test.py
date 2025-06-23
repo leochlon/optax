@@ -758,25 +758,25 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     num_linesearch_steps = optax.tree.get(info, 'num_linesearch_steps')
     decrease_error = optax.tree.get(info, 'decrease_error')
     curvature_error = optax.tree.get(info, 'curvature_error')
-    
+
     if allow_failure:
       potentially_failed = (
           num_linesearch_steps >= opt_args['max_linesearch_steps']
       )
     else:
       potentially_failed = False
-      
+
     slope_init = optax.tree.real(optax.tree.vdot(updates, grad_init))
     slope_final = optax.tree.real(optax.tree.vdot(updates, grad_final))
-    
+
     default_opt_args = {
         'ftol': 1e-3,
         'gtol': 0.9,
         'xtol': 0.1,
     }
     opt_args = default_opt_args | opt_args
-    ftol, gtol, xtol = opt_args['ftol'], opt_args['gtol'], opt_args['xtol']
-    
+    ftol, gtol = opt_args['ftol'], opt_args['gtol']
+
     with self.subTest('Check Armijo sufficient decrease condition'):
       armijo_threshold = value_init + ftol * final_lr * slope_init
       sufficient_decrease = value_final <= armijo_threshold
@@ -785,7 +785,7 @@ class MoreThuenteLinesearchTest(chex.TestCase):
           f'Armijo condition failed: {value_final} > {armijo_threshold}, '
           f'decrease_error: {decrease_error}'
       )
-    
+
     with self.subTest('Check strong curvature condition'):
       strong_curvature = jnp.abs(slope_final) <= gtol * jnp.abs(slope_init)
       self.assertTrue(
@@ -822,7 +822,7 @@ class MoreThuenteLinesearchTest(chex.TestCase):
   @parameterized.product(
       problem_name=[
           'polynomial',
-          'exponential', 
+          'exponential',
           'sinusoidal',
           'rosenbrock',
           'himmelblau',
@@ -872,24 +872,24 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     """Test convergence on a simple quadratic function."""
     def fn(x):
       return 0.5 * jnp.sum(x**2)
-    
+
     init_params = jnp.array([2.0, -3.0])
     init_updates = -jax.grad(fn)(init_params)  # Steepest descent direction
-    
+
     opt = _linesearch.scale_by_more_thuente_linesearch(
         max_linesearch_steps=10, ftol=1e-4, gtol=0.1
     )
-    
+
     final_params, final_state = _run_linesearch(
         opt, fn, init_params, init_updates
     )
-    
+
     # For a quadratic function, should find exact minimum in one step
     # with perfect line search
     info = optax.tree.get(final_state, 'info')
     num_steps = optax.tree.get(info, 'num_linesearch_steps')
     learning_rate = optax.tree.get(final_state, 'learning_rate')
-    
+
     # Should converge quickly
     self.assertLessEqual(num_steps, 10)
     # Should find a reasonable step size
@@ -900,25 +900,25 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     """Test performance on the classic Rosenbrock function."""
     def rosenbrock_2d(x):
       return (1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2
-    
+
     init_params = jnp.array([-1.2, 1.0])  # Standard starting point
     init_updates = -jax.grad(rosenbrock_2d)(init_params)
-    
+
     opt = _linesearch.scale_by_more_thuente_linesearch(
         max_linesearch_steps=20, ftol=1e-4, gtol=0.9
     )
-    
+
     final_params, final_state = _run_linesearch(
         opt, rosenbrock_2d, init_params, init_updates
     )
-    
+
     # Check that we made progress toward the minimum at (1, 1)
     init_distance = jnp.linalg.norm(init_params - jnp.array([1.0, 1.0]))
     final_distance = jnp.linalg.norm(final_params - jnp.array([1.0, 1.0]))
-    
-    self.assertLess(final_distance, init_distance, 
+
+    self.assertLess(final_distance, init_distance,
                    "Should make progress toward Rosenbrock minimum")
-    
+
     # Check function value improved
     init_value = rosenbrock_2d(init_params)
     final_value = optax.tree.get(final_state, 'value')
@@ -930,14 +930,14 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     # Test invalid ftol (must be in (0, 0.5))
     with self.assertRaises((ValueError, AssertionError)):
       _linesearch.scale_by_more_thuente_linesearch(ftol=0.6)
-    
-    with self.assertRaises((ValueError, AssertionError)):  
+
+    with self.assertRaises((ValueError, AssertionError)):
       _linesearch.scale_by_more_thuente_linesearch(ftol=0.0)
-    
+
     # Test invalid gtol (must be in (ftol, 1))
     with self.assertRaises((ValueError, AssertionError)):
       _linesearch.scale_by_more_thuente_linesearch(ftol=0.1, gtol=0.05)
-      
+
     with self.assertRaises((ValueError, AssertionError)):
       _linesearch.scale_by_more_thuente_linesearch(gtol=1.0)
 
@@ -945,20 +945,20 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     """Test that step sizes remain within reasonable bounds."""
     def fn(x):
       return jnp.sum(x**4)  # Function that might lead to large steps
-    
+
     init_params = jnp.array([0.1])
     init_updates = -jax.grad(fn)(init_params)
-    
+
     opt = _linesearch.scale_by_more_thuente_linesearch(
         max_linesearch_steps=15, ftol=1e-4, gtol=0.9
     )
-    
+
     final_params, final_state = _run_linesearch(
         opt, fn, init_params, init_updates
     )
-    
+
     learning_rate = optax.tree.get(final_state, 'learning_rate')
-    
+
     # Step size should be reasonable (not too large or too small)
     self.assertGreater(learning_rate, 1e-10, "Step size too small")
     self.assertLess(learning_rate, 1e10, "Step size too large")
@@ -995,17 +995,17 @@ class MoreThuenteLinesearchTest(chex.TestCase):
 
     # Check convergence
     final_distance = jnp.linalg.norm(params - final_params)
-    self.assertLess(final_distance, 1e-3, 
+    self.assertLess(final_distance, 1e-3,
                    f"Should converge close to target: distance = {final_distance}")
 
   def test_comparison_with_backtracking(self):
     """Compare Moré-Thuente with backtracking linesearch on same problem."""
     def fn(x):
       return 0.5 * jnp.sum((x - jnp.array([1.0, -1.0]))**2)
-    
+
     init_params = jnp.array([3.0, 4.0])
     init_updates = -jax.grad(fn)(init_params)
-    
+
     # Test Moré-Thuente
     mt_opt = _linesearch.scale_by_more_thuente_linesearch(
         max_linesearch_steps=20, ftol=1e-4, gtol=0.9
@@ -1013,7 +1013,7 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     mt_final_params, mt_final_state = _run_linesearch(
         mt_opt, fn, init_params, init_updates
     )
-    
+
     # Test backtracking
     bt_opt = _linesearch.scale_by_backtracking_linesearch(
         max_backtracking_steps=20, slope_rtol=1e-4
@@ -1021,12 +1021,12 @@ class MoreThuenteLinesearchTest(chex.TestCase):
     bt_final_params, bt_final_state = _run_linesearch(
         bt_opt, fn, init_params, init_updates
     )
-    
+
     # Both should achieve similar function value reduction
     init_value = fn(init_params)
     mt_value = optax.tree.get(mt_final_state, 'value')
     bt_value = optax.tree.get(bt_final_state, 'value')
-    
+
     # Both should reduce function value significantly
     self.assertLess(mt_value, 0.9 * init_value)
     self.assertLess(bt_value, 0.9 * init_value)

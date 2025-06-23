@@ -1696,30 +1696,7 @@ class ScaleByMoreThuenteState(NamedTuple):
   info: MoreThuenteInfo
 
 class LineSearchState(NamedTuple):
-  """Internal state for the Moré-Thuente line search algorithm.
-  
-  This state is used internally during the line search iterations and
-  contains all the information needed to track the search progress.
-
-  Attributes:
-    count: current iteration number.
-    params: current parameters.
-    updates: search direction (update vector).
-    stp: current step size being evaluated.
-    f: function value at current step.
-    g: directional derivative at current step.
-    interval: packed array [stx, fx, gx, sty, fy, gy] containing the
-      bracket endpoints and their function/derivative values.
-    bounds: packed array [stmin, stmax, width, width1] containing search
-      bounds and interval width tracking.
-    search_params: packed array [finit, ginit, gtest, ftol, gtol, xtol]
-      containing initial values and tolerances.
-    stage: algorithm stage (1 or 2) for modified function handling.
-    brackt: boolean indicating if interval brackets a minimum.
-    nfev: number of function evaluations performed.
-    converged: boolean indicating convergence.
-    failed: boolean indicating failure.
-  """
+  """Internal state for Moré-Thuente line search algorithm."""
   count: chex.Scalar
   params: base.Params
   updates: base.Updates
@@ -1738,137 +1715,106 @@ class LineSearchState(NamedTuple):
 
 @jax.jit
 def mcstep_compact(interval, stp, fp, gp, bounds, brackt):
-  """Compute a new step size using safeguarded cubic interpolation.
-  
-  This is the core step computation of the Moré-Thuente algorithm. It uses
-  cubic interpolation with safeguarding to generate a new trial step size
-  that maintains convergence properties and numerical stability.
-  
-  The algorithm distinguishes between four cases based on the function and
-  derivative values:
-  1. Higher function value (use cubic with quadratic backup)
-  2. Opposite derivative signs (use cubic with secant backup)  
-  3. Decreasing derivative (use cubic/secant with conservative safeguarding)
-  4. Increasing derivative (use cubic from other endpoint)
+  """Compute new step using safeguarded cubic interpolation.
 
   Args:
-    interval: array [stx, fx, gx, sty, fy, gy] containing the current
-      interval endpoints and their function/derivative values.
+    interval: [stx, fx, gx, sty, fy, gy] interval endpoints.
     stp: current trial step size.
-    fp: function value at the trial step.
-    gp: directional derivative at the trial step.
-    bounds: array [stmin, stmax, width, width1] with search bounds.
-    brackt: boolean indicating if the interval brackets a minimum.
+    fp: function value at trial step.
+    gp: directional derivative at trial step.
+    bounds: [stmin, stmax, width, width1] search bounds.
+    brackt: whether interval brackets minimum.
 
   Returns:
-    tuple (new_interval, new_step, new_brackt) where:
-      - new_interval: updated interval endpoints
-      - new_step: new trial step size  
-      - new_brackt: updated bracket status
+    tuple (new_interval, new_step, new_brackt).
   """
-  # Unpack interval endpoints and their values
   stx, fx, gx, sty, fy, gy = interval
   stmin, stmax = bounds[0], bounds[1]
-  
-  # Compute sign of derivative product for case determination
   sgnd = gp * (gx / jnp.abs(gx))
-  
-  # Define case-specific step computation functions
-  # Each case uses different interpolation strategies for robustness
-  
+
   def case1():
-    """Case 1: Higher function value - use cubic interpolation with quadratic backup."""
+    """Higher function value."""
     # Compute cubic interpolation parameters
-    theta = 3 * (fx - fp) / (stp - stx) + gx + gp
-    s = jnp.maximum(jnp.maximum(jnp.abs(theta), jnp.abs(gx)), jnp.abs(gp))
-    s = jnp.maximum(s, EPSMACH)  # Prevent division by zero
-    gamma = s * jnp.sqrt(jnp.maximum(0, (theta/s)**2 - (gx/s)*(gp/s)))
-    gamma = jnp.where(stp < stx, -gamma, gamma)
-    
-    # Two-step cubic formula for numerical stability
-    p = (gamma - gx) + theta
-    q = ((gamma - gx) + gamma) + gp
-    r = jnp.where(jnp.abs(q) > EPSMACH, p/q, 0)
-    stc = stx + r * (stp - stx)
-    
-    # Quadratic backup in case cubic is unreliable
-    denom = (fx - fp) / (stp - stx) + gx
-    stq = jnp.where(jnp.abs(denom) > EPSMACH, 
-                    stx + gx / (2.0 * denom) * (stp - stx), stc)
-    
-    # Choose between cubic and quadratic, with averaging for stability
-    stf = jnp.where(jnp.abs(stc-stx) < jnp.abs(stq-stx), stc, stc + (stq-stc)/2)
-    return stf, 1
-    
-  def case2():
-    """Case 2: Opposite derivative signs - use cubic interpolation with secant backup."""
-    # Cubic interpolation (same as case 1)
     theta = 3 * (fx - fp) / (stp - stx) + gx + gp
     s = jnp.maximum(jnp.maximum(jnp.abs(theta), jnp.abs(gx)), jnp.abs(gp))
     s = jnp.maximum(s, EPSMACH)
     gamma = s * jnp.sqrt(jnp.maximum(0, (theta/s)**2 - (gx/s)*(gp/s)))
     gamma = jnp.where(stp < stx, -gamma, gamma)
-    
+
     p = (gamma - gx) + theta
     q = ((gamma - gx) + gamma) + gp
     r = jnp.where(jnp.abs(q) > EPSMACH, p/q, 0)
     stc = stx + r * (stp - stx)
-    
-    # Secant method backup
-    sts = jnp.where(jnp.abs(gp - gx) > EPSMACH, 
+
+    denom = (fx - fp) / (stp - stx) + gx
+    stq = jnp.where(jnp.abs(denom) > EPSMACH,
+                    stx + gx / (2.0 * denom) * (stp - stx), stc)
+
+    stf = jnp.where(jnp.abs(stc-stx) < jnp.abs(stq-stx), stc, stc + (stq-stc)/2)
+    return stf, 1
+
+  def case2():
+    """Opposite derivative signs."""
+    # Cubic interpolation
+    theta = 3 * (fx - fp) / (stp - stx) + gx + gp
+    s = jnp.maximum(jnp.maximum(jnp.abs(theta), jnp.abs(gx)), jnp.abs(gp))
+    s = jnp.maximum(s, EPSMACH)
+    gamma = s * jnp.sqrt(jnp.maximum(0, (theta/s)**2 - (gx/s)*(gp/s)))
+    gamma = jnp.where(stp < stx, -gamma, gamma)
+
+    p = (gamma - gx) + theta
+    q = ((gamma - gx) + gamma) + gp
+    r = jnp.where(jnp.abs(q) > EPSMACH, p/q, 0)
+    stc = stx + r * (stp - stx)
+
+    sts = jnp.where(jnp.abs(gp - gx) > EPSMACH,
                     stp + gp / (gp - gx) * (stx - stp), stc)
-    
-    # Choose based on distance from current step
+
     stf = jnp.where(jnp.abs(stc-stp) > jnp.abs(sts-stp), stc, sts)
     return stf, 1
-    
+
   def case3():
-    """Case 3: Decreasing derivative - use conservative safeguarding."""
+    """Decreasing derivative."""
     # Cubic interpolation (same as cases 1 and 2)
     theta = 3 * (fx - fp) / (stp - stx) + gx + gp
     s = jnp.maximum(jnp.maximum(jnp.abs(theta), jnp.abs(gx)), jnp.abs(gp))
     s = jnp.maximum(s, EPSMACH)
     gamma = s * jnp.sqrt(jnp.maximum(0, (theta/s)**2 - (gx/s)*(gp/s)))
     gamma = jnp.where(stp < stx, -gamma, gamma)
-    
+
     p = (gamma - gx) + theta
     q = ((gamma - gx) + gamma) + gp
     r = jnp.where(jnp.abs(q) > EPSMACH, p/q, 0)
     stc = stx + r * (stp - stx)
-    
-    # Secant method
-    sts = jnp.where(jnp.abs(gp - gx) > EPSMACH, 
+
+    sts = jnp.where(jnp.abs(gp - gx) > EPSMACH,
                     stp + gp / (gp - gx) * (stx - stp), stc)
     step = jnp.where(jnp.abs(stc-stp) < jnp.abs(sts-stp), stc, sts)
-    
-    # Conservative safeguarding for multimodal functions
-    # Use smaller factor (0.5 instead of 0.66) to prevent overshooting
+
     conservative_factor = 0.5
-    stf = jnp.where(brackt, 
-                    jnp.where(stp > stx, 
+    stf = jnp.where(brackt,
+                    jnp.where(stp > stx,
                              jnp.minimum(stp + conservative_factor*(sty-stp), step),
                              jnp.maximum(stp + conservative_factor*(sty-stp), step)),
                     jnp.clip(step, stmin, stmax))
     return stf, brackt
-    
+
   def case4():
-    """Case 4: Increasing derivative - use cubic from other endpoint."""
-    # Use the other endpoint (sty) as the base for cubic interpolation
+    """Increasing derivative."""
     theta = 3 * (fy - fp) / (stp - sty) + gy + gp
     s = jnp.maximum(jnp.maximum(jnp.abs(theta), jnp.abs(gy)), jnp.abs(gp))
     s = jnp.maximum(s, EPSMACH)
     gamma = s * jnp.sqrt(jnp.maximum(0, (theta/s)**2 - (gy/s)*(gp/s)))
     gamma = jnp.where(stp < sty, -gamma, gamma)
-    
+
     p = (gamma - gy) + theta
     q = ((gamma - gy) + gamma) + gp
     r = jnp.where(jnp.abs(q) > EPSMACH, p/q, 0)
     cubic_step = sty + r * (stp - sty)
-    
-    # Bracket-aware handling
+
     stf = jnp.where(brackt, cubic_step, jnp.where(stp > stx, stmax, stmin))
     return stf, brackt
-  
+
   # Select appropriate case based on function and derivative values
   # Use jax.lax.cond for better numerical stability than jnp.where
   stf, new_brackt = jax.lax.cond(
@@ -1877,149 +1823,88 @@ def mcstep_compact(interval, stp, fp, gp, bounds, brackt):
           sgnd < 0, case2,  # Opposite derivative signs
           lambda: jax.lax.cond(
               jnp.abs(gp) < jnp.abs(gx), case3, case4)))  # Decreasing vs increasing derivative
-  
+
   # Update interval endpoints based on the trial point results
   new_interval = jnp.where(
-      fp > fx, 
+      fp > fx,
       jnp.array([stx, fx, gx, stp, fp, gp]),  # Replace sty with trial point
       jnp.where(
-          sgnd < 0, 
-          jnp.array([stp, fp, gp, stx, fx, gx]),  # Replace stx with trial point  
+          sgnd < 0,
+          jnp.array([stp, fp, gp, stx, fx, gx]),  # Replace stx with trial point
           jnp.array([stp, fp, gp, sty, fy, gy])))  # Replace stx with trial point
-  
+
   # Ensure the new step remains within bounds
   return new_interval, jnp.clip(stf, stmin, stmax), new_brackt
 
 def more_thuente_linesearch(
-    max_linesearch_steps: int = 20, 
+    max_linesearch_steps: int = 20,
     ftol: float = 1e-3,
-    gtol: float = 0.9, 
-    xtol: float = 0.1, 
+    gtol: float = 0.9,
+    xtol: float = 0.1,
     verbose: bool = False
 ):
-  """Create Moré-Thuente line search with guaranteed sufficient decrease.
-  
-  This function implements the Moré-Thuente line search algorithm that finds
-  a step size satisfying both the Armijo sufficient decrease condition and
-  the strong Wolfe curvature condition. The algorithm uses safeguarded cubic
-  interpolation and maintains interval brackets around acceptable step sizes.
-  
-  The sufficient decrease condition (Armijo condition) requires:
-    f(x + α*p) ≤ f(x) + ftol * α * ∇f(x)ᵀp
-    
-  The strong curvature condition requires:
-    |∇f(x + α*p)ᵀp| ≤ gtol * |∇f(x)ᵀp|
-    
+  """Create Moré-Thuente line search with strong Wolfe conditions.
+
   Args:
-    max_linesearch_steps: maximum number of line search iterations.
-    ftol: parameter for the Armijo sufficient decrease condition.
-      Must be in (0, 0.5). Typical values are 1e-4 to 1e-3.
-    gtol: parameter for the strong curvature condition.  
-      Must be in (ftol, 1). Typical values are 0.1 to 0.9.
-    xtol: relative width tolerance for interval convergence.
-      When the bracket width becomes smaller than xtol times the
-      maximum step size, the search terminates.
-    verbose: whether to print debugging information.
-    
+    max_linesearch_steps: maximum line search iterations.
+    ftol: Armijo condition parameter in (0, 0.5).
+    gtol: strong curvature parameter in (ftol, 1).
+    xtol: relative width tolerance for convergence.
+    verbose: print debugging information.
+
   Returns:
-    tuple (init_fn, step_fn, cond_step_fn) where:
-    
-    * init_fn(updates, params, *, value, grad, stepsize_guess) -> LineSearchState
-      initializes the line search state.
-    * step_fn(state, *, value_and_grad_fn, fn_kwargs) -> tuple[LineSearchState, bool]
-      performs one line search iteration, returning updated state and stop condition.
-    * cond_step_fn(state) -> bool
-      returns whether to continue the line search iterations.
-      
-  References:
-    Moré, J. J., & Thuente, D. J. (1994). Line search algorithms with guaranteed
-    sufficient decrease. ACM Transactions on Mathematical Software, 20(3), 286-307.
+    tuple (init_fn, step_fn, cond_step_fn) for line search components.
   """
-  
+
   def init_fn(updates, params, *, value, grad, stepsize_guess=1.0):
-    """Initialize the line search state.
-    
-    Args:
-      updates: search direction (typically from L-BFGS or other optimizer).
-      params: current parameter values.
-      value: function value at current parameters.
-      grad: gradient at current parameters.
-      stepsize_guess: initial guess for the step size.
-      
-    Returns:
-      LineSearchState: initial state for the line search.
-    """
-    # Compute initial directional derivative
+    """Initialize line search state."""
     derphi0 = optax.tree.real(optax.tree.vdot(updates, grad))
-    
+
     return LineSearchState(
-        count=jnp.array(0), 
-        params=params, 
-        updates=updates, 
+        count=jnp.array(0),
+        params=params,
+        updates=updates,
         stp=jnp.array(stepsize_guess),
-        f=jnp.array(jnp.nan), 
+        f=jnp.array(jnp.nan),
         g=jnp.array(jnp.nan),
-        # Initialize interval with both endpoints at origin
         interval=jnp.array([0.0, value, derphi0, 0.0, value, derphi0]),
-        # Set initial bounds: [stmin, stmax, width, width1]
         bounds=jnp.array([0.0, stepsize_guess * 4.0, 1e10, 1e10 / 0.5]),
-        # Pack tolerances and initial values for efficient access
         search_params=jnp.array([value, derphi0, ftol * derphi0, ftol, gtol, xtol]),
-        stage=jnp.array(1),  # Start in stage 1 (modified function stage)
-        brackt=jnp.array(0),  # No bracket initially
-        nfev=jnp.array(0),    # Function evaluation counter
-        converged=jnp.array(0), 
+        stage=jnp.array(1),
+        brackt=jnp.array(0),
+        nfev=jnp.array(0),
+        converged=jnp.array(0),
         failed=jnp.array(0))
 
   def step_fn(state, *, value_and_grad_fn, fn_kwargs):
-    """Perform one iteration of the Moré-Thuente line search.
-    
-    Args:
-      state: current LineSearchState.
-      value_and_grad_fn: function that computes value and gradient.
-      fn_kwargs: additional keyword arguments for the function.
-      
-    Returns:
-      tuple (new_state, should_stop) where:
-        - new_state: updated LineSearchState
-        - should_stop: boolean indicating if search should terminate
-    """
-    # Extract current values and parameters
+    """Perform one Moré-Thuente line search iteration."""
     f_current, g_current = state.f, state.g
     finit, ginit, gtest, ftol_val, gtol_val, xtol_val = state.search_params
     stage, brackt = state.stage, state.brackt
     stmin, stmax, width, width1 = state.bounds
-    
+
     # Check convergence conditions
-    ftest = finit + state.stp * gtest  # Armijo threshold
-    armijo = f_current <= ftest        # Sufficient decrease satisfied
-    curvature = jnp.abs(g_current) <= gtol_val * jnp.abs(ginit)  # Strong curvature satisfied
+    ftest = finit + state.stp * gtest
+    armijo = f_current <= ftest
+    curvature = jnp.abs(g_current) <= gtol_val * jnp.abs(ginit)
     converged = jnp.asarray(armijo & curvature, dtype=jnp.int32)
-    
-    # Check various failure/warning conditions for robustness
+
     current_width = jnp.abs(state.interval[3] - state.interval[0])
-    width_warning = brackt & (current_width <= xtol_val * stmax)  # Interval too narrow
-    bracket_warning = brackt & ((state.stp <= stmin) | (state.stp >= stmax))  # Step at bounds
+    width_warning = brackt & (current_width <= xtol_val * stmax)
+    bracket_warning = brackt & ((state.stp <= stmin) | (state.stp >= stmax))
     bounds_warning = ((state.stp >= 1e10) & (f_current <= ftest) & (g_current <= gtest)) | \
-                     ((state.stp <= 0.0) & ((f_current > ftest) | (g_current >= gtest)))  # Extreme steps
-    
+                     ((state.stp <= 0.0) & ((f_current > ftest) | (g_current >= gtest)))
+
     has_warning = bracket_warning | width_warning | bounds_warning
     failed = jnp.asarray((state.count >= max_linesearch_steps) | has_warning, dtype=jnp.int32)
-    converged = jnp.asarray(converged | width_warning, dtype=jnp.int32)  # Width warning can indicate convergence
+    converged = jnp.asarray(converged | width_warning, dtype=jnp.int32)
     should_stop = converged | failed
-    
+
     def update_search():
-      """Perform the main line search update when not yet converged."""
-      
-      # Stage transition: move to stage 2 when sufficient decrease achieved
-      # and derivative becomes non-negative (indicating we're past the minimum)
+      """Perform main line search update."""
+
       new_stage = jnp.where((stage == 1) & (f_current <= ftest) & (g_current >= 0.0), 2, stage)
-      
-      # Determine if we should use the modified function (stage 1 only)
-      # Modified function helps when we have sufficient decrease but not strong curvature
       use_modified = (stage == 1) & (f_current <= state.interval[1]) & (f_current > ftest)
-      
-      # Apply modified function transformation if needed
       # The modified function is: ψ(α) = φ(α) - φ(0) - ftol*α*φ'(0)
       # This removes the linear trend to focus on curvature properties
       def apply_modified():
@@ -2031,92 +1916,78 @@ def more_thuente_linesearch(
           state.interval[4] - state.interval[3] * gtest,  # Modified fy
           state.interval[5] - gtest           # Modified gy
         )
-      
+
       def use_original():
-        return (f_current, g_current, state.interval[1], state.interval[2], 
+        return (f_current, g_current, state.interval[1], state.interval[2],
                 state.interval[4], state.interval[5])
-      
-      # Use JAX conditional for numerical stability
+
       fm, gm, fxm, gxm, fym, gym = jax.lax.cond(use_modified, apply_modified, use_original)
-      
-      # Compute new step using the mcstep algorithm
+
       modified_interval = jnp.array([state.interval[0], fxm, gxm, state.interval[3], fym, gym])
       new_interval, stp_new, new_brackt = mcstep_compact(modified_interval, state.stp, fm, gm, state.bounds, brackt)
-      
-      # Convert back from modified function if necessary
+
       def convert_back():
         return jnp.array([
-            new_interval[0], 
-            new_interval[1] + new_interval[0] * gtest,  # Convert fx back
-            new_interval[2] + gtest,                    # Convert gx back
+            new_interval[0],
+            new_interval[1] + new_interval[0] * gtest,
+            new_interval[2] + gtest,
             new_interval[3],
-            new_interval[4] + new_interval[3] * gtest,  # Convert fy back
-            new_interval[5] + gtest                     # Convert gy back
+            new_interval[4] + new_interval[3] * gtest,
+            new_interval[5] + gtest
         ])
-      
+
       def use_original_back():
         return new_interval
-      
+
       final_interval = jax.lax.cond(use_modified, convert_back, use_original_back)
-      
-      # Implement aggressive bisection for difficult optimization landscapes
+
+      # Aggressive bisection for difficult optimization landscapes
       new_width = jnp.abs(final_interval[3] - final_interval[0])
-      # Force bisection when interval width reduction is insufficient
       force_bisection = new_brackt & ((new_width > 0.5 * width) | (new_width > 0.33 * width1))
       bisection_needed = new_brackt & (force_bisection | (new_width >= BISECTION_FACTOR * width1))
-      stp_final = jnp.where(bisection_needed, 
-                           final_interval[0] + 0.5 * (final_interval[3] - final_interval[0]), 
+      stp_final = jnp.where(bisection_needed,
+                           final_interval[0] + 0.5 * (final_interval[3] - final_interval[0]),
                            stp_new)
-      
-      # Conservative bounds extrapolation to prevent excessive step sizes
-      # This is especially important for multimodal/non-convex functions
-      conservative_extrap_lower = 1.05  # More conservative than default 1.1
-      conservative_extrap_upper = 2.0   # More conservative than default 4.0
-      
-      new_stmin = jnp.where(new_brackt, 
+
+      conservative_extrap_lower = 1.05
+      conservative_extrap_upper = 2.0
+
+      new_stmin = jnp.where(new_brackt,
                            jnp.minimum(final_interval[0], final_interval[3]),
-                           jnp.where(~new_brackt, 
-                                    stp_final + conservative_extrap_lower * (stp_final - final_interval[0]), 
+                           jnp.where(~new_brackt,
+                                    stp_final + conservative_extrap_lower * (stp_final - final_interval[0]),
                                     stmin))
-      new_stmax = jnp.where(new_brackt, 
+      new_stmax = jnp.where(new_brackt,
                            jnp.maximum(final_interval[0], final_interval[3]),
                            jnp.where(stp_final > final_interval[0],
-                                    stp_final + conservative_extrap_upper * (stp_final - final_interval[0]), 
+                                    stp_final + conservative_extrap_upper * (stp_final - final_interval[0]),
                                     stmax))
-      
-      # Return updated state with all new values
+
       return state._replace(
-          count=state.count + 1, 
-          stp=jnp.clip(stp_final, 0.0, 1e10),  # Ensure step stays reasonable
-          f=f_current, 
-          g=g_current, 
+          count=state.count + 1,
+          stp=jnp.clip(stp_final, 0.0, 1e10),
+          f=f_current,
+          g=g_current,
           interval=final_interval,
           bounds=jnp.array([new_stmin, new_stmax, new_width, width]),
-          stage=new_stage, 
-          brackt=new_brackt, 
+          stage=new_stage,
+          brackt=new_brackt,
           nfev=state.nfev + 1,
-          converged=converged, 
+          converged=converged,
           failed=failed), jnp.asarray(should_stop, dtype=jnp.int32)
-    
+
     # Use JAX conditional to either stop or continue the search
     return jax.lax.cond(
         should_stop,
         # If stopping, just update function values and status
         lambda: (state._replace(f=f_current, g=g_current, nfev=state.nfev + 1,
-                               converged=converged, failed=failed), 
+                               converged=converged, failed=failed),
                 jnp.asarray(1, dtype=jnp.int32)),
         # Otherwise, perform the full search update
         update_search)
 
   def step_cond_fn(state):
-    """Check if the line search should continue.
-    
-    Args:
-      state: current LineSearchState.
-      
-    Returns:
-      bool: True if search should continue, False if converged or failed.
-    """
+    """Check if line search should continue."""
     return (state.converged | state.failed) == 0
 
   return init_fn, step_fn, step_cond_fn
@@ -2129,112 +2000,24 @@ def scale_by_more_thuente_linesearch(
     initial_guess_strategy: str = "keep",
     verbose: bool = False,
 ) -> base.GradientTransformationExtraArgs:
-  r"""Moré-Thuente line-search ensuring strong Wolfe conditions.
+  r"""Moré-Thuente line search ensuring strong Wolfe conditions.
 
-  Implements the Moré-Thuente line search algorithm that finds a step size
-  satisfying both the Armijo sufficient decrease condition and the strong Wolfe
-  curvature condition. This line search is particularly effective for quasi-Newton
-  methods like L-BFGS as it guarantees the positive definiteness of the Hessian
-  approximation.
-
-  The sufficient decrease condition (Armijo condition) requires:
-
-  .. math::
-    f(w + \eta u) \leq f(w) + \eta c_1 \langle u, \nabla f(w) \rangle
-
-  The strong curvature condition (strong Wolfe condition) requires:
-
-  .. math::
-    |\langle u, \nabla f(w + \eta u) \rangle| \leq c_2 |\langle u, \nabla f(w) \rangle|
-
-  where :math:`f` is the function to minimize, :math:`w` are the current
-  parameters, :math:`\eta` is the learning rate, :math:`u` is the update direction,
-  :math:`c_1` is ``ftol``, and :math:`c_2` is ``gtol``.
-
-  The algorithm uses safeguarded cubic interpolation with interval bracketing
-  to efficiently locate acceptable step sizes. It maintains numerical stability
-  through careful handling of edge cases and adaptive bisection strategies.
+  Finds step size satisfying Armijo decrease and strong curvature conditions:
+  f(x + α*p) ≤ f(x) + ftol*α*∇f(x)ᵀp and |∇f(x + α*p)ᵀp| ≤ gtol*|∇f(x)ᵀp|
 
   Args:
-    max_linesearch_steps: Maximum number of line search iterations. Typical
-      values range from 10-50 depending on function complexity.
-    ftol: Parameter for the Armijo sufficient decrease condition. Must be in
-      (0, 0.5). Smaller values require more decrease, larger values are more
-      permissive. Typical values: 1e-4 for smooth functions, 1e-3 for noisy ones.
-    gtol: Parameter for the strong curvature condition. Must be in (ftol, 1).
-      Smaller values require flatter curvature, larger values are more permissive.
-      For L-BFGS, values of 0.9 work well; for gradient descent, 0.1-0.4 is typical.
-    xtol: Relative width tolerance for interval convergence. When the bracket
-      width becomes smaller than xtol times the step size range, the search
-      terminates. Typical values: 0.1-0.01.
-    initial_guess_strategy: Strategy for initial step size guess. Options:
-      
-      * ``"keep"``: Use the step size from the previous iteration (recommended
-        for L-BFGS and quasi-Newton methods).
-      * ``"one"``: Always start with step size 1.0 (useful for gradient descent).
-
-    verbose: Whether to print debugging information during the line search.
+    max_linesearch_steps: Maximum line search iterations.
+    ftol: Armijo condition parameter in (0, 0.5).
+    gtol: Strong curvature parameter in (ftol, 1).
+    xtol: Relative width tolerance for convergence.
+    initial_guess_strategy: "keep" (reuse previous) or "one" (always 1.0).
+    verbose: Print debugging info.
 
   Returns:
-    A :class:`GradientTransformationExtraArgs`, where the ``update`` function
-    takes the following additional keyword arguments:
-
-    * ``value``: Value of the function at the current params.
-    * ``grad``: Gradient of the function at the current params.
-    * ``value_fn``: Function returning the value of the function we seek to
-      optimize.
-    * ``**extra_args``: Additional keyword arguments for the function.
-
-  Note:
-    This line search is designed for smooth, differentiable functions and works
-    best with quasi-Newton methods. For noisy or non-smooth functions, consider
-    using backtracking line search instead. The algorithm may require many
-    function evaluations on highly multimodal functions.
-
-  Examples:
-
-    Using Moré-Thuente line search with L-BFGS:
-
-      >>> import optax
-      >>> import jax
-      >>> import jax.numpy as jnp
-      >>> solver = optax.lbfgs(
-      ...     linesearch=optax.scale_by_more_thuente_linesearch(
-      ...         max_linesearch_steps=20,
-      ...         ftol=1e-3,
-      ...         gtol=0.9
-      ...     )
-      ... )
-      >>> def fn(params): return jnp.sum(params ** 2)
-      >>> params = jnp.array([1., 2., 3.])
-      >>> opt_state = solver.init(params)
-      >>> for _ in range(10):
-      ...   value, grad = jax.value_and_grad(fn)(params)
-      ...   updates, opt_state = solver.update(
-      ...       grad, opt_state, params,
-      ...       value=value, grad=grad, value_fn=fn
-      ...   )
-      ...   params = optax.apply_updates(params, updates)
-
-    Using with a custom function and additional arguments:
-
-      >>> def fn(params, x, y): return optax.l2_loss(x.dot(params), y)
-      >>> x, y = jnp.array([3., 2., 1.]), jnp.array(0.)
-      >>> solver = optax.lbfgs(
-      ...     linesearch=optax.scale_by_more_thuente_linesearch(ftol=1e-4)
-      ... )
-      >>> params = jnp.array([1., 2., 3.])
-      >>> opt_state = solver.init(params)
-      >>> value, grad = jax.value_and_grad(fn)(params, x, y)
-      >>> updates, opt_state = solver.update(
-      ...     grad, opt_state, params,
-      ...     value=value, grad=grad, value_fn=fn, x=x, y=y
-      ... )
-      >>> params = optax.apply_updates(params, updates)
+    GradientTransformationExtraArgs requiring value, grad, value_fn arguments.
 
   References:
-    Moré, J. J., & Thuente, D. J. (1994). Line search algorithms with guaranteed
-    sufficient decrease. ACM Transactions on Mathematical Software, 20(3), 286-307.
+    Moré & Thuente (1994). Line search algorithms with guaranteed sufficient decrease.
   """
   # Parameter validation
   if not (0 < ftol < 0.5):
@@ -2247,105 +2030,82 @@ def scale_by_more_thuente_linesearch(
     raise ValueError(f"max_linesearch_steps must be positive, got {max_linesearch_steps}")
   if initial_guess_strategy not in ["keep", "one"]:
     raise ValueError(f"initial_guess_strategy must be 'keep' or 'one', got '{initial_guess_strategy}'")
-    
-  # Initialize the Moré-Thuente line search components
+
   init_ls, step_ls, cond_step_ls = more_thuente_linesearch(max_linesearch_steps, ftol, gtol, xtol, verbose)
 
   def init_fn(params):
-    """Initialize the optimization state with default values."""
-    # Ensure consistent dtype for numerical stability
+    """Initialize optimization state."""
     val_dtype = jnp.real(jax.tree.leaves(params)[0]).dtype
     return ScaleByMoreThuenteState(
-        learning_rate=jnp.asarray(1.0, dtype=val_dtype), 
+        learning_rate=jnp.asarray(1.0, dtype=val_dtype),
         value=jnp.asarray(jnp.inf, dtype=val_dtype),
         grad=optax.tree.zeros_like(params),
         info=MoreThuenteInfo(
             num_linesearch_steps=jnp.asarray(0),
-            decrease_error=jnp.asarray(jnp.inf), 
+            decrease_error=jnp.asarray(jnp.inf),
             curvature_error=jnp.asarray(jnp.inf)
         )
     )
 
   def update_fn(updates, state, params, *, value, grad, value_fn, **extra_args):
     """Perform one optimization step using Moré-Thuente line search."""
-    # Extract function kwargs for value_fn calls
     (fn_kwargs,), _ = utils._extract_fns_kwargs((value_fn,), extra_args)
-    # Create combined value and gradient function for efficiency
     value_and_grad_fn = jax.value_and_grad(value_fn)
-    
-    # Determine initial step size based on strategy
+
     stepsize_guess = jnp.asarray(1.0) if initial_guess_strategy == "one" else state.learning_rate
-    
-    # Initialize line search state with current optimization state
     init_state = init_ls(updates, params, value=value, grad=grad, stepsize_guess=stepsize_guess)
-    
-    # Define scan function for efficient iteration over line search steps
+
     def scan_fn(carry_state, _):
-      """Single iteration of the line search process."""
       search_state, should_stop = carry_state
-      
-      # Evaluate function at current trial step
       step_params = optax.tree.add_scale(search_state.params, search_state.stp, search_state.updates)
       f_trial, g_trial = value_and_grad_fn(step_params, **fn_kwargs)
-      
-      # Compute directional derivative for Wolfe conditions
       g_trial_dot = optax.tree.real(optax.tree.vdot(optax.tree.conj(g_trial), search_state.updates))
-      
-      # Update search state or stop based on convergence
+
       new_state, new_should_stop = jax.lax.cond(
           should_stop,
-          # If already converged, just update function values
           lambda: (search_state._replace(
               f=f_trial, g=g_trial_dot, nfev=search_state.nfev + 1,
               converged=jnp.asarray(0, dtype=jnp.int32),
               failed=jnp.asarray(0, dtype=jnp.int32)
           ), jnp.asarray(1, dtype=jnp.int32)),
-          # Otherwise, perform line search step
           lambda: step_ls(
               search_state._replace(f=f_trial, g=g_trial_dot),
-              value_and_grad_fn=value_and_grad_fn, 
+              value_and_grad_fn=value_and_grad_fn,
               fn_kwargs=fn_kwargs
           )
       )
       return (new_state, new_should_stop), None
-    
+
     # Check if initial state already satisfies convergence conditions
     initial_converged = jnp.asarray(cond_step_ls(init_state) == 0, dtype=jnp.int32)
-    
+
     # Run line search iterations using scan for efficiency
     (final_state, _), _ = jax.lax.scan(
         scan_fn, (init_state, initial_converged), None, length=max_linesearch_steps
     )
-    
-    # Extract results and compute convergence diagnostics
+
     learning_rate = final_state.stp
     finit, ginit, gtest, _, gtol_val, _ = final_state.search_params
-    
-    # Compute Armijo and curvature condition errors for diagnostics
-    ftest = finit + final_state.stp * gtest  # Armijo threshold
-    decrease_error = jnp.maximum(0.0, final_state.f - ftest)  # Sufficient decrease violation
-    curvature_error = jnp.maximum(0.0, jnp.abs(final_state.g) - gtol_val * jnp.abs(ginit))  # Curvature violation
-    
-    # Create diagnostic info for monitoring line search performance
+    ftest = finit + final_state.stp * gtest
+    decrease_error = jnp.maximum(0.0, final_state.f - ftest)
+    curvature_error = jnp.maximum(0.0, jnp.abs(final_state.g) - gtol_val * jnp.abs(ginit))
+
     info = MoreThuenteInfo(
-        num_linesearch_steps=final_state.count, 
-        decrease_error=decrease_error, 
+        num_linesearch_steps=final_state.count,
+        decrease_error=decrease_error,
         curvature_error=curvature_error
     )
-    
-    # Evaluate function at final accepted step for state consistency  
+
     final_params = optax.tree.add_scale(params, learning_rate, updates)
     final_value, final_grad = value_and_grad_fn(final_params, **fn_kwargs)
-    
-    # Update optimizer state with line search results
+
     new_state = ScaleByMoreThuenteState(
-        learning_rate=learning_rate, 
-        value=final_value, 
-        grad=final_grad, 
+        learning_rate=learning_rate,
+        value=final_value,
+        grad=final_grad,
         info=info
     )
-    
-    # Return scaled updates and properly typed state
+
     return optax.tree.scale(learning_rate, updates), optax.tree.cast_like(new_state, other_tree=state)
 
   return base.GradientTransformationExtraArgs(init_fn, update_fn)
