@@ -83,9 +83,12 @@ from optax._src.linear_algebra import matrix_inverse_pth_root
 from optax._src.linear_algebra import nnls
 from optax._src.linear_algebra import power_iteration
 from optax._src.linesearch import scale_by_backtracking_linesearch
+from optax._src.linesearch import scale_by_more_thuente_linesearch
 from optax._src.linesearch import scale_by_zoom_linesearch
 from optax._src.linesearch import ScaleByBacktrackingLinesearchState
+from optax._src.linesearch import ScaleByMoreThuenteState
 from optax._src.linesearch import ScaleByZoomLinesearchState
+from optax._src.linesearch import MoreThuenteInfo
 from optax._src.linesearch import ZoomLinesearchInfo
 from optax._src.lookahead import lookahead
 from optax._src.lookahead import LookaheadParams
@@ -249,6 +252,15 @@ softmax_cross_entropy_with_integer_labels = (
 )
 squared_error = losses.squared_error
 sigmoid_focal_loss = losses.sigmoid_focal_loss
+# Add new loss functions to top-level namespace
+dice_loss = losses.dice_loss
+enhanced_kl_divergence = losses.enhanced_kl_divergence
+enhanced_triplet_loss = losses.enhanced_triplet_loss
+gaussian_nll_loss = losses.gaussian_nll_loss
+iou_loss = losses.iou_loss
+nll_loss = losses.nll_loss
+poisson_nll_loss = losses.poisson_nll_loss
+triplet_margin_loss = losses.triplet_margin_loss
 
 _deprecations = {
     # Added Apr 2024
@@ -343,6 +355,7 @@ __all__ = (
     "differentially_private_aggregate",
     "DifferentiallyPrivateAggregateState",
     "dpsgd",
+    "dice_loss",
     "ema",
     "EmaState",
     "EmptyState",
@@ -419,6 +432,7 @@ __all__ = (
     "scale_by_lbfgs",
     "scale_by_lion",
     "scale_by_factored_rms",
+    "scale_by_more_thuente_linesearch",
     "scale_by_novograd",
     "scale_by_param_block_norm",
     "scale_by_param_block_rms",
@@ -444,6 +458,7 @@ __all__ = (
     "ScaleByBeliefState",
     "ScaleByLBFGSState",
     "ScaleByLionState",
+    "ScaleByMoreThuenteState",
     "ScaleByNovogradState",
     "ScaleByRmsState",
     "ScaleByRpropState",
@@ -481,6 +496,7 @@ __all__ = (
     "yogi",
     "zero_nans",
     "ZeroNansState",
+    "MoreThuenteInfo",
     "ZoomLinesearchInfo",
 )
 
